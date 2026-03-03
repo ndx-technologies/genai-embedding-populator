@@ -29,6 +29,8 @@ func main() {
 		cloudStorageRequestPath string
 		genaiLocation           string
 		genaiModel              string
+		embeddingNameStr        string
+		taskTypeStr             string
 	)
 	flag.StringVar(&projectID, "project_id", os.Getenv("PROJECT_ID"), "GCP project ID")
 	flag.StringVar(&firestoreCollection, "firestore_collection", "", "Firestore collection")
@@ -39,6 +41,9 @@ func main() {
 	flag.StringVar(&cloudStorageRequestPath, "cloud_storage_request_path", "", "GCS path prefix for batch request files")
 	flag.StringVar(&genaiLocation, "genai_location", "", "GenAI location")
 	flag.StringVar(&genaiModel, "genai_model", "", "GenAI embedding model")
+	flag.StringVar(&embeddingNameStr, "embedding_name", "", "embedding name to be set in key path map")
+	flag.StringVar(&taskTypeStr, "task_type", "", "embedding task type to include in batch request metadata")
+
 	flag.Parse()
 
 	if projectID == "" || firestoreCollection == "" || firestoreKeyPath == "" || cloudStorageBucket == "" || cloudStorageRequestPath == "" {
@@ -82,6 +87,9 @@ func main() {
 		RequestPath: cloudStorageRequestPath,
 	}
 
+	embeddingName := genaix.EmbeddingName(embeddingNameStr)
+	taskType := genaix.EmbeddingTaskType(taskTypeStr)
+
 	if redisSetKey != "" {
 		redisConfig, err := redis.ParseURL(redisURL)
 		if err != nil {
@@ -112,7 +120,7 @@ func main() {
 				continue
 			}
 
-			if err := submitter.Write(ctx, genaix.DocumentID(doc.Ref.ID), text); err != nil {
+			if err := submitter.Write(ctx, genaix.DocumentID(doc.Ref.ID), text, embeddingName, taskType); err != nil {
 				log.Fatal(err)
 			}
 		}
@@ -139,7 +147,7 @@ func main() {
 				continue
 			}
 
-			if err := submitter.Write(ctx, genaix.DocumentID(doc.Ref.ID), text); err != nil {
+			if err := submitter.Write(ctx, genaix.DocumentID(doc.Ref.ID), text, embeddingName, taskType); err != nil {
 				log.Fatal(err)
 			}
 		}

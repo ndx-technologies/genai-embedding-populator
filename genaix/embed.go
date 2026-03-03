@@ -19,11 +19,28 @@ type RequestID struct{ uuid.UUID }
 
 func NewRequestID() RequestID { return RequestID{uuid.New()} }
 
+type EmbeddingName string
+
+type EmbeddingTaskType string
+
+const (
+	Classification     EmbeddingTaskType = "CLASSIFICATION"
+	Clustering         EmbeddingTaskType = "CLUSTERING"
+	RetrievalDocument  EmbeddingTaskType = "RETRIEVAL_DOCUMENT"
+	RetrievalQuery     EmbeddingTaskType = "RETRIEVAL_QUERY"
+	QuestionAnswering  EmbeddingTaskType = "QUESTION_ANSWERING"
+	FactVerification   EmbeddingTaskType = "FACT_VERIFICATION"
+	CodeRetrievalQuery EmbeddingTaskType = "CODE_RETRIEVAL_QUERY"
+	SemanticSimilarity EmbeddingTaskType = "SEMANTIC_SIMILARITY"
+)
+
+// https://docs.cloud.google.com/vertex-ai/generative-ai/docs/embeddings/batch-prediction-genai-embeddings
 type EmbeddingBatchRequest struct {
-	Model   string         `json:"model"`
-	Content *genai.Content `json:"content"`
+	Content  *genai.Content    `json:"content"`
+	TaskType EmbeddingTaskType `json:"taskType,omitempty"`
 }
 
+// https://docs.cloud.google.com/vertex-ai/generative-ai/docs/embeddings/batch-prediction-genai-embeddings
 type EmbeddingBatchResponse struct {
 	Embeddings []EmbeddingValues `json:"embeddings"`
 }
@@ -50,21 +67,23 @@ func (s *EmbeddingBatchSubmitter) keyResult() string {
 	return s.RequestPath + "/result/" + s.ID.String()
 }
 
-func (s *EmbeddingBatchSubmitter) Write(ctx context.Context, id DocumentID, text string) error {
+func (s *EmbeddingBatchSubmitter) Write(ctx context.Context, id DocumentID, text string, name EmbeddingName, task EmbeddingTaskType) error {
 	if s.W == nil {
 		s.W = s.Bucket.Object(s.keyRequest()).NewWriter(ctx)
 	}
 
 	req := struct {
-		ID      string                `json:"id"`
-		DocID   string                `json:"doc_id"`
+		ID      RequestID             `json:"id"`
+		DocID   DocumentID            `json:"doc_id"`
+		Name    EmbeddingName         `json:"embedding_name,omitempty"`
 		Request EmbeddingBatchRequest `json:"request"`
 	}{
-		ID:    NewRequestID().String(),
-		DocID: string(id),
+		ID:    NewRequestID(),
+		DocID: id,
+		Name:  name,
 		Request: EmbeddingBatchRequest{
-			Model:   s.Model,
-			Content: &genai.Content{Role: "user", Parts: []*genai.Part{genai.NewPartFromText(text)}},
+			Content:  &genai.Content{Role: "user", Parts: []*genai.Part{genai.NewPartFromText(text)}},
+			TaskType: task,
 		},
 	}
 
@@ -87,27 +106,29 @@ func (s *EmbeddingBatchSubmitter) Submit(ctx context.Context) error {
 	if s.Count == 0 {
 		return nil
 	}
-	src := genai.BatchJobSource{
-		Format: "jsonl",
-		GCSURI: []string{"gs://" + s.Bucket.BucketName() + "/" + s.keyRequest()},
-	}
-	dst := genai.BatchJobDestination{
-		Format: "jsonl",
-		GCSURI: "gs://" + s.Bucket.BucketName() + "/" + s.keyResult(),
-	}
-	_, err := s.Client.Batches.Create(ctx, s.Model, &src, &genai.CreateBatchJobConfig{
-		DisplayName: "embedding_populator_" + s.ID.String(),
-		Dest:        &dst,
-	})
+	_, err := s.Client.Batches.Create(
+		ctx,
+		s.Model,
+		&genai.BatchJobSource{Format: "jsonl", GCSURI: []string{"gs://" + s.Bucket.BucketName() + "/" + s.keyRequest()}},
+		&genai.CreateBatchJobConfig{
+			DisplayName: "embedding_populator_" + s.ID.String(),
+			Dest:        &genai.BatchJobDestination{Format: "jsonl", GCSURI: "gs://" + s.Bucket.BucketName() + "/" + s.keyResult()},
+		},
+	)
 	return err
 }
 
-type EmbeddingBatchResultIterator struct {
-	Bucket *storage.BucketHandle
+type EmbeddingResult struct {
+	ID            RequestID              `json:"id"`
+	DocID         DocumentID             `json:"doc_id"`
+	EmbeddingName EmbeddingName          `json:"embedding_name,omitempty"`
+	Response      EmbeddingBatchResponse `json:"response"`
 }
 
-func (s EmbeddingBatchResultIterator) Iter(ctx context.Context, key string) iter.Seq2[DocumentID, []float32] {
-	return func(yield func(DocumentID, []float32) bool) {
+type EmbeddingBatchResultIterator struct{ Bucket *storage.BucketHandle }
+
+func (s EmbeddingBatchResultIterator) Iter(ctx context.Context, key string) iter.Seq[EmbeddingResult] {
+	return func(yield func(EmbeddingResult) bool) {
 		r, err := s.Bucket.Object(key).NewReader(ctx)
 		if err != nil {
 			slog.ErrorContext(ctx, "failed to open embedding results", "error", err, "key", key)
@@ -125,18 +146,12 @@ func (s EmbeddingBatchResultIterator) Iter(ctx context.Context, key string) iter
 		}()
 
 		for scanner.Scan() {
-			var e struct {
-				ID       RequestID               `json:"id"`
-				DocID    DocumentID              `json:"doc_id"`
-				Response *EmbeddingBatchResponse `json:"response"`
-			}
-
-			if err := json.Unmarshal(scanner.Bytes(), &e); err != nil || e.Response == nil || len(e.Response.Embeddings) == 0 {
-				slog.ErrorContext(ctx, "failed to unmarshal or empty embedding response", "error", err, "id", e.ID)
+			var e EmbeddingResult
+			if err := json.Unmarshal(scanner.Bytes(), &e); err != nil {
+				slog.ErrorContext(ctx, "failed to unmarshal or empty embedding response", "error", err, "id", e.ID, "content", string(scanner.Bytes()))
 				continue
 			}
-
-			if !yield(e.DocID, e.Response.Embeddings[0].Values) {
+			if !yield(e) {
 				return
 			}
 		}

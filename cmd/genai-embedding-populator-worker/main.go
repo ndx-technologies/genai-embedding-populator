@@ -75,13 +75,19 @@ func main() {
 			return
 		}
 
-		for docID, embedding := range resultIterator.Iter(ctx, e.Name) {
-			if _, err := firestoreClient.Collection(firestoreCollection).Doc(string(docID)).Set(
+		for e := range resultIterator.Iter(ctx, e.Name) {
+			if len(e.Response.Embeddings) == 0 {
+				slog.ErrorContext(ctx, "empty embedding response", "id", e.ID)
+				continue
+			}
+			if _, err := firestoreClient.Collection(firestoreCollection).Doc(string(e.DocID)).Set(
 				ctx,
-				map[string]any{firestoreEmbeddingPath: firestore.Vector32(embedding)},
+				map[string]any{
+					firestoreEmbeddingPath + "." + string(e.EmbeddingName): firestore.Vector32(e.Response.Embeddings[0].Values),
+				},
 				firestore.MergeAll,
 			); err != nil {
-				slog.ErrorContext(ctx, "failed to write embedding", "error", err, "doc_id", docID)
+				slog.ErrorContext(ctx, "failed to write embedding", "error", err, "doc_id", e.DocID)
 			}
 		}
 
