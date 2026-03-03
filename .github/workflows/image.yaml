@@ -1,8 +1,15 @@
 name: images
 
-on: [push]
+on:
+  push:
+    tags:
+      - "*"
+    branches:
+      - master
 
-permissions: read-all
+permissions:
+  contents: read
+  packages: write
 
 jobs:
   build-and-publish:
